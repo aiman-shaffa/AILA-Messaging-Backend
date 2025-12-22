@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+project_venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+coverage/
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Node (none today, kept out defensively)
+node_modules/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Logs and scratch
+*.log
+logs/
+tmp/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Not part of this repository
+.github/
