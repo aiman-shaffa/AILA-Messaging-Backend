@@ -2,13 +2,11 @@ services:
   db:
     image: postgres:16
     environment:
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_USER: postgres
-      POSTGRES_DB: aila
-    ports:
-      - "5432:5432"
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-aila}
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d aila"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 3s
       timeout: 3s
       retries: 30
@@ -18,9 +16,9 @@ services:
       context: ./backend
       dockerfile: Dockerfile.api
     environment:
-      DATABASE_URL: postgresql+asyncpg://postgres:postgres@db:5432/aila
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-aila}
     ports:
-      - "8000:8000"
+      - "${API_PORT:-8000}:8000"
     depends_on:
       db:
         condition: service_healthy
@@ -30,13 +28,14 @@ services:
       context: ./backend
       dockerfile: Dockerfile.worker
     environment:
-      DATABASE_URL: postgresql+asyncpg://postgres:postgres@db:5432/aila
-      MIN_DELAY_SECONDS: 3
-      MAX_DELAY_SECONDS: 60
-      FAIL_RATE: 0.2
-      CONCURRENCY: 8
-      CLAIM_BATCH: 10
-      MAX_ATTEMPTS: 3
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-aila}
+      MIN_DELAY_SECONDS: ${MIN_DELAY_SECONDS:-3}
+      MAX_DELAY_SECONDS: ${MAX_DELAY_SECONDS:-60}
+      FAIL_RATE: ${FAIL_RATE:-0.2}
+      CONCURRENCY: ${CONCURRENCY:-8}
+      CLAIM_BATCH: ${CLAIM_BATCH:-10}
+      MAX_ATTEMPTS: ${MAX_ATTEMPTS:-3}
+      PROCESSING_TIMEOUT_SECONDS: ${PROCESSING_TIMEOUT_SECONDS:-300}
     depends_on:
       db:
         condition: service_healthy
