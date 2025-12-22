@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 import random
 import uuid
@@ -31,6 +32,7 @@ BACKOFF_MAX_SECONDS = int(os.getenv("BACKOFF_MAX_SECONDS", "120"))
 
 engine = create_async_engine(DATABASE_URL, pool_pre_ping=True)
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
+log = logging.getLogger("worker")
 
 
 @dataclass
@@ -93,7 +95,7 @@ async def reap_expired_jobs():
             )
 
 
-async def claim_jobs() -> List[Job]:
+async def claim_jobs(limit: int | None = None) -> List[Job]:
     async with SessionLocal() as session:
         async with session.begin():
             # Claim RECEIVED jobs that are available, in send-order within a conversation (seq),
@@ -120,7 +122,7 @@ async def claim_jobs() -> List[Job]:
                     RETURNING id, user_text, attempt_count
                     """
                 ),
-                {"batch": CLAIM_BATCH, "lease_secs": PROCESSING_TIMEOUT_SECONDS},
+                {"batch": CLAIM_BATCH if limit is None else limit, "lease_secs": PROCESSING_TIMEOUT_SECONDS},
             )
             rows = res.mappings().all()
             return [Job(id=row["id"], user_text=row["user_text"], attempt_count=row["attempt_count"]) for row in rows]
@@ -194,15 +196,20 @@ async def mark_failed(job: Job, err: str):
             )
 
 
-async def process_job(job: Job, sem: asyncio.Semaphore):
-    async with sem:
-        delay = random.randint(MIN_DELAY_SECONDS, MAX_DELAY_SECONDS)
-        await asyncio.sleep(delay)
-        if random.random() < FAIL_RATE:
-            await mark_failed(job, f"simulated failure after {delay}s (attempt {job.attempt_count})")
-        else:
-            # A placeholder "AI" response. In real integration, call your LLM here.
-            await mark_completed(job, f"[AI] Response (attempt {job.attempt_count}): {job.user_text}")
+async def process_job(job: Job):
+    delay = random.randint(MIN_DELAY_SECONDS, MAX_DELAY_SECONDS)
+    await asyncio.sleep(delay)
+    if random.random() < FAIL_RATE:
+        await mark_failed(job, f"simulated failure after {delay}s (attempt {job.attempt_count})")
+    else:
+        # A placeholder "AI" response. In real integration, call your LLM here.
+        await mark_completed(job, f"[AI] Response (attempt {job.attempt_count}): {job.user_text}")
+
+
+def _log_crash(task: asyncio.Task) -> None:
+    if not task.cancelled() and task.exception() is not None:
+        # The row stays PROCESSING; the reaper requeues it once its lease expires.
+        log.error("job crashed", exc_info=task.exception())
 
 
 async def ensure_schema():
@@ -210,18 +217,32 @@ async def ensure_schema():
         await conn.run_sync(Base.metadata.create_all)
 
 
-async def main():
-    await ensure_schema()
-    sem = asyncio.Semaphore(CONCURRENCY)
-    while True:
+async def run(stop: asyncio.Event | None = None):
+    """Keep up to CONCURRENCY jobs in flight.
+
+    Jobs are only claimed for free slots, so a claimed job's lease never ticks
+    while it waits behind others, and one slow job does not hold back the rest
+    of its batch.
+    """
+    in_flight: set[asyncio.Task] = set()
+    while stop is None or not stop.is_set():
         await reap_expired_jobs()
-        jobs = await claim_jobs()
+        free = CONCURRENCY - len(in_flight)
+        jobs = await claim_jobs(min(CLAIM_BATCH, free)) if free > 0 else []
+        for job in jobs:
+            task = asyncio.create_task(process_job(job))
+            in_flight.add(task)
+            task.add_done_callback(in_flight.discard)
+            task.add_done_callback(_log_crash)
         if not jobs:
             await asyncio.sleep(POLL_INTERVAL_SECONDS)
-            continue
+    await asyncio.gather(*in_flight, return_exceptions=True)
 
-        tasks = [asyncio.create_task(process_job(j, sem)) for j in jobs]
-        await asyncio.gather(*tasks)
+
+async def main():
+    logging.basicConfig(level=logging.INFO)
+    await ensure_schema()
+    await run()
 
 
 if __name__ == "__main__":

@@ -200,7 +200,7 @@ async def test_process_job_completes_on_success(instant, monkeypatch):
     mid = await new_message("ping")
     [job] = await w.claim_jobs()
 
-    await w.process_job(job, asyncio.Semaphore(1))
+    await w.process_job(job)
 
     row = await fetch_message(mid)
     assert row["state"] == "COMPLETED"
@@ -212,8 +212,74 @@ async def test_process_job_records_simulated_failure(instant, monkeypatch):
     mid = await new_message()
     [job] = await w.claim_jobs()
 
-    await w.process_job(job, asyncio.Semaphore(1))
+    await w.process_job(job)
 
     row = await fetch_message(mid)
     assert row["state"] == "RECEIVED"
     assert row["last_error"].startswith("simulated failure")
+
+
+async def test_claim_limit_overrides_batch_size():
+    for i in range(3):
+        await new_message(f"m{i}")
+
+    assert len(await w.claim_jobs(1)) == 1
+    assert await w.claim_jobs(0) == []
+
+
+async def wait_for(predicate, timeout=10.0):
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not await predicate():
+        assert loop.time() < deadline, "condition not reached in time"
+        await asyncio.sleep(0.05)
+
+
+async def count_states():
+    async with SessionLocal() as session:
+        res = await session.execute(text("SELECT state, count(*) FROM messages GROUP BY state"))
+        return dict(res.all())
+
+
+async def test_run_never_holds_more_jobs_than_it_can_process(monkeypatch):
+    monkeypatch.setattr(w, "MIN_DELAY_SECONDS", 1)
+    monkeypatch.setattr(w, "MAX_DELAY_SECONDS", 1)
+    monkeypatch.setattr(w, "FAIL_RATE", 0.0)
+    monkeypatch.setattr(w, "CONCURRENCY", 2)
+    monkeypatch.setattr(w, "CLAIM_BATCH", 10)
+    monkeypatch.setattr(w, "POLL_INTERVAL_SECONDS", 0.05)
+    for i in range(5):
+        await new_message(f"m{i}", conversation_id=f"c{i}")
+    stop = asyncio.Event()
+    runner = asyncio.create_task(w.run(stop))
+
+    async def two_in_flight():
+        return (await count_states()).get("PROCESSING") == 2
+
+    await wait_for(two_in_flight)
+    assert (await count_states()).get("RECEIVED") == 3
+
+    async def all_done():
+        return (await count_states()) == {"COMPLETED": 5}
+
+    await wait_for(all_done)
+    stop.set()
+    await runner
+
+
+async def test_run_keeps_retrying_until_dead_lettered(monkeypatch, instant):
+    monkeypatch.setattr(w, "FAIL_RATE", 1.0)
+    monkeypatch.setattr(w, "BACKOFF_BASE_SECONDS", 0)
+    monkeypatch.setattr(w, "POLL_INTERVAL_SECONDS", 0.05)
+    mid = await new_message()
+    stop = asyncio.Event()
+    runner = asyncio.create_task(w.run(stop))
+
+    async def failed():
+        return (await count_states()) == {"FAILED": 1}
+
+    await wait_for(failed)
+    stop.set()
+    await runner
+    assert (await fetch_message(mid))["attempt_count"] == 3
+    assert await dead_letter_count(mid) == 1
