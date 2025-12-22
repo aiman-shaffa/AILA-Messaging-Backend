@@ -36,7 +36,7 @@ class Message(Base):
     user_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     conversation_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
 
-    # Client-provided idempotency key. If not provided, server generates one.
+    # Client-provided idempotency key, unique per (user, conversation). Generated when omitted.
     client_message_id: Mapped[str] = mapped_column(String(128), nullable=False)
 
     seq: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
@@ -74,7 +74,9 @@ class Message(Base):
             name="fk_message_conversation",
             ondelete="CASCADE",
         ),
-        UniqueConstraint("conversation_id", "client_message_id", name="uq_conversation_client_message_id"),
+        UniqueConstraint(
+            "user_id", "conversation_id", "client_message_id", name="uq_user_conversation_client_message_id"
+        ),
         CheckConstraint("attempt_count >= 0", name="chk_attempt_count_nonnegative"),
     )
 

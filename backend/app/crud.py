@@ -20,22 +20,7 @@ async def create_message(
     # If not provided, generate one (still stable for this request only).
     client_message_id = client_message_id or str(uuid.uuid4())
 
-    msg: Message | None = None
-    created = False
-
     async with session.begin():
-        # If already exists (duplicate submission), return existing record.
-        existing = await session.execute(
-            select(Message).where(
-                Message.conversation_id == conversation_id,
-                Message.client_message_id == client_message_id,
-            )
-        )
-        msg = existing.scalar_one_or_none()
-        if msg:
-            return msg
-
-        # Ensure conversation row exists
         await session.execute(
             text(
                 """
@@ -47,7 +32,9 @@ async def create_message(
             {"user_id": user_id, "conversation_id": conversation_id},
         )
 
-        # Lock conversation row to allocate a strict, monotonic seq (send-order)
+        # Lock conversation row to allocate a strict, monotonic seq (send-order).
+        # The lock also serialises duplicate submissions, so the lookup below
+        # sees any copy committed by a concurrent request with the same key.
         res = await session.execute(
             text(
                 """
@@ -58,8 +45,18 @@ async def create_message(
             ),
             {"user_id": user_id, "conversation_id": conversation_id},
         )
-        next_seq = res.scalar_one()
-        seq = int(next_seq)
+        seq = int(res.scalar_one())
+
+        existing = await session.execute(
+            select(Message).where(
+                Message.user_id == user_id,
+                Message.conversation_id == conversation_id,
+                Message.client_message_id == client_message_id,
+            )
+        )
+        duplicate = existing.scalar_one_or_none()
+        if duplicate:
+            return duplicate
 
         await session.execute(
             text(
@@ -91,14 +88,8 @@ async def create_message(
             updated_at=datetime.utcnow(),
         )
         session.add(msg)
-        created = True
 
-    if msg is None:
-        raise RuntimeError("Message creation failed")
-
-    if created:
-        # Refresh to ensure PK and timestamps are there
-        await session.refresh(msg)
+    await session.refresh(msg)
     return msg
 
 

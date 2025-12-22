@@ -112,3 +112,26 @@ async def test_message_status_rejects_malformed_id(client):
 async def test_empty_text_is_rejected(client):
     res = await client.post("/messages", json=payload(""))
     assert res.status_code == 422
+
+
+async def test_same_key_from_another_user_is_a_separate_message(client):
+    mine = await client.post("/messages", json=payload("mine", user_id="u1", client_message_id="k"))
+    theirs = await client.post("/messages", json=payload("theirs", user_id="u2", client_message_id="k"))
+
+    assert theirs.status_code == 201
+    assert theirs.json()["message_id"] != mine.json()["message_id"]
+    assert theirs.json()["user_id"] == "u2"
+    assert theirs.json()["text"] == "theirs"
+    u2 = (await client.get("/conversations/u2")).json()
+    assert [m["text"] for m in u2["conversations"][0]["messages"]] == ["theirs"]
+
+
+async def test_concurrent_duplicate_submissions_create_one_message(client):
+    responses = await asyncio.gather(
+        *(client.post("/messages", json=payload("retry storm", client_message_id="same")) for _ in range(10))
+    )
+
+    assert all(r.status_code == 201 for r in responses)
+    assert len({r.json()["message_id"] for r in responses}) == 1
+    follow_up = await client.post("/messages", json=payload("next"))
+    assert follow_up.json()["seq"] == 2
