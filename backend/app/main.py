@@ -1,11 +1,11 @@
-from fastapi import FastAPI, Depends, HTTPException, Query
-from sqlalchemy.ext.asyncio import AsyncSession
 from uuid import UUID
 
-from .db import init_db, get_db
-from .schemas import MessageCreate, MessageOut, ConversationsOut, ConversationMessages, MessageStatus
-from .crud import create_message, get_messages_for_user, get_message
+from fastapi import Depends, FastAPI, HTTPException, Query
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from .crud import create_message, get_message, get_messages_for_user
+from .db import get_db, init_db
+from .schemas import ConversationMessages, ConversationsOut, MessageCreate, MessageOut, MessageStatus
 
 app = FastAPI(title="AILA Messaging Backend", version="0.1.0")
 

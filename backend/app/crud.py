@@ -1,11 +1,11 @@
 import uuid
-from datetime import datetime, timedelta
-from typing import Optional, List, Dict
+from datetime import datetime
+from typing import List, Optional
 
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .models import Conversation, Message
+from .models import Message
 
 
 async def create_message(
@@ -107,7 +107,9 @@ async def get_message(session: AsyncSession, message_id: uuid.UUID) -> Optional[
     return res.scalar_one_or_none()
 
 
-async def get_messages_for_user(session: AsyncSession, user_id: str, conversation_id: Optional[str] = None) -> List[Message]:
+async def get_messages_for_user(
+    session: AsyncSession, user_id: str, conversation_id: Optional[str] = None
+) -> List[Message]:
     stmt = select(Message).where(Message.user_id == user_id)
     if conversation_id:
         stmt = stmt.where(Message.conversation_id == conversation_id)

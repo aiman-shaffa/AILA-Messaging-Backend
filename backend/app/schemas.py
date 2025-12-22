@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Optional, List, Dict
+from typing import List, Optional
 from uuid import UUID
 
 from pydantic import BaseModel, Field
