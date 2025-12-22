@@ -51,26 +51,33 @@ def backoff_seconds(attempt: int) -> int:
 
 
 async def reap_expired_jobs():
-    # If a worker crashes mid-processing, the row may be stuck in PROCESSING.
-    # We convert expired leases into TIMEOUT (and optionally requeue, capped by MAX_ATTEMPTS).
+    # A worker that crashes or stalls mid-processing leaves its row in PROCESSING.
+    # Expired leases become TIMEOUT; those with attempts left are requeued, the rest
+    # are dead-lettered and stay TIMEOUT.
     async with SessionLocal() as session:
         async with session.begin():
-            # Mark timed-out PROCESSING rows as TIMEOUT
             await session.execute(
                 text(
                     """
-                    UPDATE messages
-                    SET state = 'TIMEOUT',
-                        last_error = COALESCE(last_error, 'processing lease expired'),
-                        updated_at = now()
-                    WHERE state = 'PROCESSING'
-                      AND processing_deadline_at IS NOT NULL
-                      AND processing_deadline_at < now()
+                    WITH expired AS (
+                        UPDATE messages
+                        SET state = 'TIMEOUT',
+                            last_error = 'processing lease expired',
+                            updated_at = now()
+                        WHERE state = 'PROCESSING'
+                          AND processing_deadline_at IS NOT NULL
+                          AND processing_deadline_at < now()
+                        RETURNING id, user_id, conversation_id, seq, attempt_count
+                    )
+                    INSERT INTO dead_letters (id, message_id, user_id, conversation_id, seq, reason, created_at)
+                    SELECT gen_random_uuid(), id, user_id, conversation_id, seq, 'processing lease expired', now()
+                    FROM expired
+                    WHERE attempt_count >= :max_attempts
                     """
-                )
+                ),
+                {"max_attempts": MAX_ATTEMPTS},
             )
 
-            # Requeue TIMEOUT rows if retries remain
             await session.execute(
                 text(
                     """
@@ -119,6 +126,9 @@ async def claim_jobs() -> List[Job]:
             return [Job(id=row["id"], user_text=row["user_text"], attempt_count=row["attempt_count"]) for row in rows]
 
 
+# Every transition out of PROCESSING is guarded by the attempt number, so a worker
+# whose lease expired (and whose job was reclaimed by someone else) cannot overwrite
+# the newer attempt's outcome.
 async def mark_completed(job: Job, assistant_text: str):
     async with SessionLocal() as session:
         async with session.begin():
@@ -133,53 +143,18 @@ async def mark_completed(job: Job, assistant_text: str):
                         last_error = NULL
                     WHERE id = :id
                       AND state = 'PROCESSING'
+                      AND attempt_count = :attempt
                     """
                 ),
-                {"id": job.id, "assistant_text": assistant_text},
+                {"id": job.id, "attempt": job.attempt_count, "assistant_text": assistant_text},
             )
 
 
-async def send_to_dead_letter(job: Job, reason: str):
-    async with SessionLocal() as session:
-        async with session.begin():
-            # Capture message metadata for debugging
-            row = (
-                await session.execute(
-                    text(
-                        """
-                        SELECT user_id, conversation_id, seq
-                        FROM messages
-                        WHERE id = :id
-                        """
-                    ),
-                    {"id": job.id},
-                )
-            ).mappings().first()
-            if row:
-                await session.execute(
-                    text(
-                        """
-                        INSERT INTO dead_letters (id, message_id, user_id, conversation_id, seq, reason, created_at)
-                        VALUES (:id, :message_id, :user_id, :conversation_id, :seq, :reason, now())
-                        """
-                    ),
-                    {
-                        "message_id": job.id,
-                        "user_id": row["user_id"],
-                        "conversation_id": row["conversation_id"],
-                        "seq": row["seq"],
-                        "id": uuid.uuid4(),
-                        "reason": reason,
-                    },
-                )
-
-
 async def mark_failed(job: Job, err: str):
-    retry = job.attempt_count < MAX_ATTEMPTS
+    params = {"id": job.id, "attempt": job.attempt_count, "err": err}
     async with SessionLocal() as session:
         async with session.begin():
-            if retry:
-                delay = backoff_seconds(job.attempt_count)
+            if job.attempt_count < MAX_ATTEMPTS:
                 await session.execute(
                     text(
                         """
@@ -190,26 +165,33 @@ async def mark_failed(job: Job, err: str):
                             updated_at = now()
                         WHERE id = :id
                           AND state = 'PROCESSING'
+                          AND attempt_count = :attempt
                         """
                     ),
-                    {"id": job.id, "delay": delay, "err": err},
+                    {**params, "delay": backoff_seconds(job.attempt_count)},
                 )
-            else:
-                await session.execute(
-                    text(
-                        """
+                return
+
+            await session.execute(
+                text(
+                    """
+                    WITH failed AS (
                         UPDATE messages
                         SET state = 'FAILED',
                             last_error = :err,
                             updated_at = now()
                         WHERE id = :id
                           AND state = 'PROCESSING'
-                        """
-                    ),
-                    {"id": job.id, "err": err},
-                )
-    if not retry:
-        await send_to_dead_letter(job, err)
+                          AND attempt_count = :attempt
+                        RETURNING id, user_id, conversation_id, seq
+                    )
+                    INSERT INTO dead_letters (id, message_id, user_id, conversation_id, seq, reason, created_at)
+                    SELECT gen_random_uuid(), id, user_id, conversation_id, seq, :err, now()
+                    FROM failed
+                    """
+                ),
+                params,
+            )
 
 
 async def process_job(job: Job, sem: asyncio.Semaphore):

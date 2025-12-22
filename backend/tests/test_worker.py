@@ -135,6 +135,10 @@ async def test_retry_path_ends_in_failed_after_max_attempts(instant, monkeypatch
 
 async def test_expired_lease_is_requeued_when_attempts_remain(instant):
     mid = await new_message()
+    [job] = await w.claim_jobs()
+    await w.mark_failed(job, "first attempt failed")
+    async with SessionLocal() as session, session.begin():
+        await session.execute(text("UPDATE messages SET available_at = now() WHERE id = :id"), {"id": mid})
     await w.claim_jobs()
     await expire_lease(mid)
 
@@ -142,7 +146,9 @@ async def test_expired_lease_is_requeued_when_attempts_remain(instant):
 
     row = await fetch_message(mid)
     assert row["state"] == "RECEIVED"
+    assert row["attempt_count"] == 2
     assert row["last_error"] == "processing lease expired"
+    assert await dead_letter_count() == 0
 
 
 async def test_expired_lease_on_last_attempt_stays_timeout(instant, monkeypatch):
@@ -154,6 +160,39 @@ async def test_expired_lease_on_last_attempt_stays_timeout(instant, monkeypatch)
     await w.reap_expired_jobs()
 
     assert (await fetch_message(mid))["state"] == "TIMEOUT"
+    assert await dead_letter_count(mid) == 1
+
+
+async def test_stale_worker_cannot_overwrite_a_reclaimed_attempt(instant, monkeypatch):
+    monkeypatch.setattr(w, "BACKOFF_BASE_SECONDS", 0)
+    mid = await new_message()
+    [stale] = await w.claim_jobs()
+    await expire_lease(mid)
+    await w.reap_expired_jobs()
+    [current] = await w.claim_jobs()
+
+    await w.mark_completed(stale, "late reply")
+    await w.mark_failed(stale, "late failure")
+
+    row = await fetch_message(mid)
+    assert (row["state"], row["attempt_count"], row["assistant_text"]) == ("PROCESSING", 2, None)
+
+    await w.mark_completed(current, "fresh reply")
+    assert (await fetch_message(mid))["assistant_text"] == "fresh reply"
+
+
+async def test_stale_final_failure_is_not_dead_lettered_twice(instant, monkeypatch):
+    monkeypatch.setattr(w, "MAX_ATTEMPTS", 1)
+    mid = await new_message()
+    [job] = await w.claim_jobs()
+    await expire_lease(mid)
+    await w.reap_expired_jobs()
+
+    await w.mark_failed(job, "late failure")
+
+    row = await fetch_message(mid)
+    assert row["state"] == "TIMEOUT"
+    assert await dead_letter_count(mid) == 1
 
 
 async def test_process_job_completes_on_success(instant, monkeypatch):
