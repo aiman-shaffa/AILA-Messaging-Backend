@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException, Query
@@ -5,25 +6,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .crud import create_message, get_message, get_messages_for_user
 from .db import get_db, init_db
+from .models import Message
 from .schemas import ConversationMessages, ConversationsOut, MessageCreate, MessageOut, MessageStatus
 
-app = FastAPI(title="AILA Messaging Backend", version="0.1.0")
 
-
-@app.on_event("startup")
-async def _startup():
+@asynccontextmanager
+async def lifespan(_: FastAPI):
     await init_db()
+    yield
 
 
-@app.post("/messages", response_model=MessageOut, status_code=201)
-async def post_messages(payload: MessageCreate, db: AsyncSession = Depends(get_db)):
-    msg = await create_message(
-        db,
-        user_id=payload.user_id,
-        conversation_id=payload.conversation_id,
-        text_content=payload.text,
-        client_message_id=payload.client_message_id,
-    )
+app = FastAPI(title="AILA Messaging Backend", version="0.1.0", lifespan=lifespan)
+
+
+def to_message_out(msg: Message) -> MessageOut:
     return MessageOut(
         message_id=msg.id,
         user_id=msg.user_id,
@@ -39,35 +35,30 @@ async def post_messages(payload: MessageCreate, db: AsyncSession = Depends(get_d
     )
 
 
+@app.post("/messages", response_model=MessageOut, status_code=201)
+async def post_messages(payload: MessageCreate, db: AsyncSession = Depends(get_db)):
+    msg = await create_message(
+        db,
+        user_id=payload.user_id,
+        conversation_id=payload.conversation_id,
+        text_content=payload.text,
+        client_message_id=payload.client_message_id,
+    )
+    return to_message_out(msg)
+
+
 @app.get("/conversations/{userId}", response_model=ConversationsOut)
 async def get_conversations(
     userId: str,
     conversation_id: str | None = Query(None, description="Optional conversationId filter"),
     db: AsyncSession = Depends(get_db),
 ):
-    rows = await get_messages_for_user(db, userId, conversation_id)
+    # Rows arrive ordered by (conversation_id, seq), so insertion order is already the response order.
     grouped: dict[str, list[MessageOut]] = {}
-    for m in rows:
-        grouped.setdefault(m.conversation_id, []).append(
-            MessageOut(
-                message_id=m.id,
-                user_id=m.user_id,
-                conversation_id=m.conversation_id,
-                client_message_id=m.client_message_id,
-                seq=m.seq,
-                text=m.user_text,
-                state=m.state,
-                assistant_text=m.assistant_text,
-                last_error=m.last_error,
-                created_at=m.created_at,
-                updated_at=m.updated_at,
-            )
-        )
+    for m in await get_messages_for_user(db, userId, conversation_id):
+        grouped.setdefault(m.conversation_id, []).append(to_message_out(m))
 
     conversations = [ConversationMessages(conversation_id=cid, messages=msgs) for cid, msgs in grouped.items()]
-    # Deterministic ordering by conversation_id
-    conversations.sort(key=lambda c: c.conversation_id)
-
     return ConversationsOut(user_id=userId, conversations=conversations)
 
 

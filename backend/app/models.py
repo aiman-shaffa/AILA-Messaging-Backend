@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import (
     CheckConstraint,
@@ -17,14 +17,18 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from .db import Base
 
 
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 class Conversation(Base):
     __tablename__ = "conversations"
 
     user_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     conversation_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     next_seq: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
     messages: Mapped[list["Message"]] = relationship(back_populates="conversation")
 
@@ -48,7 +52,7 @@ class Message(Base):
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     available_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=datetime.utcnow, nullable=False, index=True
+        DateTime(timezone=True), default=utcnow, nullable=False, index=True
     )
     processing_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     processing_deadline_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -56,8 +60,8 @@ class Message(Base):
 
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
     conversation: Mapped["Conversation"] = relationship(
         back_populates="messages",
@@ -92,4 +96,4 @@ class DeadLetter(Base):
     conversation_id: Mapped[str] = mapped_column(String(128), nullable=False)
     seq: Mapped[int] = mapped_column(Integer, nullable=False)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)

@@ -1,5 +1,4 @@
 import uuid
-from datetime import datetime
 from typing import List, Optional
 
 from sqlalchemy import select, text
@@ -16,8 +15,7 @@ async def create_message(
     text_content: str,
     client_message_id: Optional[str] = None,
 ) -> Message:
-    # Idempotency: client_message_id is the natural idempotency key.
-    # If not provided, generate one (still stable for this request only).
+    # Without a client key the request cannot be deduplicated; a fresh key keeps the unique constraint satisfied.
     client_message_id = client_message_id or str(uuid.uuid4())
 
     async with session.begin():
@@ -70,22 +68,13 @@ async def create_message(
         )
 
         msg = Message(
-            id=uuid.uuid4(),
             user_id=user_id,
             conversation_id=conversation_id,
             client_message_id=client_message_id,
             seq=seq,
             user_text=text_content,
-            assistant_text=None,
             state="RECEIVED",  # UI can treat as PENDING
             attempt_count=0,
-            available_at=datetime.utcnow(),
-            processing_started_at=None,
-            processing_deadline_at=None,
-            completed_at=None,
-            last_error=None,
-            created_at=datetime.utcnow(),
-            updated_at=datetime.utcnow(),
         )
         session.add(msg)
 

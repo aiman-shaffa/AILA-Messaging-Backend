@@ -4,16 +4,11 @@ import os
 import random
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
 from typing import List
 
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from app import models  # noqa: F401
-from app.db import Base  # uses same models metadata
-
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+asyncpg://postgres:postgres@db:5432/aila")
+from app.db import SessionLocal, init_db
 
 # Simulation settings (match assignment defaults)
 MIN_DELAY_SECONDS = int(os.getenv("MIN_DELAY_SECONDS", "5"))
@@ -29,9 +24,6 @@ PROCESSING_TIMEOUT_SECONDS = int(os.getenv("PROCESSING_TIMEOUT_SECONDS", str(5 *
 BACKOFF_BASE_SECONDS = int(os.getenv("BACKOFF_BASE_SECONDS", "2"))
 BACKOFF_MAX_SECONDS = int(os.getenv("BACKOFF_MAX_SECONDS", "120"))
 
-
-engine = create_async_engine(DATABASE_URL, pool_pre_ping=True)
-SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 log = logging.getLogger("worker")
 
 
@@ -40,10 +32,6 @@ class Job:
     id: uuid.UUID
     user_text: str
     attempt_count: int
-
-
-def now_utc() -> datetime:
-    return datetime.utcnow()
 
 
 def backoff_seconds(attempt: int) -> int:
@@ -212,11 +200,6 @@ def _log_crash(task: asyncio.Task) -> None:
         log.error("job crashed", exc_info=task.exception())
 
 
-async def ensure_schema():
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-
-
 async def run(stop: asyncio.Event | None = None):
     """Keep up to CONCURRENCY jobs in flight.
 
@@ -241,7 +224,7 @@ async def run(stop: asyncio.Event | None = None):
 
 async def main():
     logging.basicConfig(level=logging.INFO)
-    await ensure_schema()
+    await init_db()
     await run()
 
 

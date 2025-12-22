@@ -8,7 +8,6 @@ from sqlalchemy import text  # noqa: E402
 
 from app.db import Base, SessionLocal, engine  # noqa: E402
 from app.main import app  # noqa: E402
-from worker import worker as worker_module  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -19,7 +18,6 @@ async def clean_db():
     yield
     # Each test runs on its own event loop; pooled asyncpg connections must not outlive it.
     await engine.dispose()
-    await worker_module.engine.dispose()
 
 
 @pytest.fixture

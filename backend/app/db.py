@@ -13,8 +13,7 @@ SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSe
 
 
 async def init_db() -> None:
-    # For a take-home assignment demo, create tables automatically.
-    # In production: use Alembic migrations.
+    # No migrations yet: create_all builds missing tables but never alters existing ones.
     from . import models  # noqa: F401
 
     async with engine.begin() as conn:
